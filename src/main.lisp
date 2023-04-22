@@ -7,6 +7,9 @@
 (in-package :text-socket)
 
 (defconstant +localhost+ "127.0.0.1")
+(defconstant +init-state+ '(:name nil
+							:location nil)
+  "Initial game state")
 
 (defmacro with-accepted-connection ((connection-var &rest socket-accept-args)
 									&body body)
@@ -15,7 +18,7 @@
 
 (defun create-server (port)
   (usocket:with-socket-listener (socket +localhost+ port)
-	(let ((name nil))
+	(let ((state +init-state+))
 	  (loop
 		(with-accepted-connection (connection socket :element-type 'character)
 		  (usocket:wait-for-input connection)
@@ -25,15 +28,51 @@
 				(format t "Client terminated~%")
 				(progn 
 				  (format t "Received ~a~%" request)
-				  (setf name request)
-				  (send-over-connection connection (format nil "Hi ~a~%" name))))))))))
+                  (let* ((parsed (parse-request request))
+						 (response (generate-response parsed state))) 
+					(send-over-connection connection (format nil "~a~%" response)))))))))))
 
-(defun get-name (connection)
-  (send-over-connection connection "Welcome! Please Enter your name:~%")
-  (usocket:wait-for-input connection)
-  (let (( name (read-line (usocket:socket-stream connection))))
-	(send-over-connection connection (format nil "Welcome ~a!~%" name))
-	name))
+(defun parse-request (request)
+  "Expect string of form ':command <cmd> :content <content>'"
+  (let ((content-pos (search ":content" request)))
+    (if (null content-pos)
+		nil
+		(let ((command-pos (search ":command" request)))
+		  (if (null command-pos)
+			  nil
+			  ;; todo: make less horrible
+			  (if (< content-pos command-pos)
+				  (let ((content (subseq request
+										 (+ content-pos
+											(length ":content"))
+										 command-pos))
+						(command (subseq request
+										 (+ command-pos
+											(length ":command")))))
+					(list :command (string-trim " " command)
+						  :content (string-trim " " content)))
+				  (let ((content (subseq request
+										 (+ content-pos
+											(length ":content"))))
+						(command (subseq request
+										 (+ command-pos
+											(length ":command"))
+										 content-pos)))
+					(list :command (string-trim " " command)
+						  :content (string-trim " " content)))))))))
+
+(defun generate-response (request state)
+  (cond ((null request)
+		 "Badly formed request")
+		((equalp (getf request :command) "name")
+		 (setf (getf state :name) (getf request :content))         
+		 (format nil "Welcome ~a!" (getf state :name)))
+		(t
+		 (format nil "Command ~a not found" (getf request :command)))))
+
+(defun update-state (request state)
+  (cond ((null (getf request :name))
+		 (setf (getf request :name) request))))
 
 (defun send-over-connection (connection text)
   (progn
@@ -44,11 +83,14 @@
   (loop
 	(usocket:with-client-socket (socket stream +localhost+ port :element-type 'character)
 	  (format t "Welcome to Text Socket!~% Please enter your name:~%")
-	  (let ((command (format nil "~a~~%" (read-line))))        
-		(send-over-connection socket command))
+	  (let* ((command (read-line))
+			 (request (create-request command)))        
+		(send-over-connection socket (format nil "~a~%" request)))
 	  (usocket:wait-for-input socket)
-	  (format t "~a~%" (read-line stream))
-	  )))
+	  (format t "~a~%" (read-line stream)))))
 
-;; ~% very important!
-;; if server is waiting and client is cut, server breaks
+(defun create-request (command)
+  (format nil ":command name :content ~a" command))
+
+;; ~% very important for read-line
+;; are defconstants appropriate here?
