@@ -34,32 +34,24 @@
 
 (defun parse-request (request)
   "Expect string of form ':command <cmd> :content <content>'"
-  (let ((content-pos (search ":content" request)))
-    (if (null content-pos)
-		nil
-		(let ((command-pos (search ":command" request)))
-		  (if (null command-pos)
-			  nil
-			  ;; todo: make less horrible
-			  (if (< content-pos command-pos)
-				  (let ((content (subseq request
-										 (+ content-pos
-											(length ":content"))
-										 command-pos))
-						(command (subseq request
-										 (+ command-pos
-											(length ":command")))))
-					(list :command (string-trim " " command)
-						  :content (string-trim " " content)))
-				  (let ((content (subseq request
-										 (+ content-pos
-											(length ":content"))))
-						(command (subseq request
-										 (+ command-pos
-											(length ":command"))
-										 content-pos)))
-					(list :command (string-trim " " command)
-						  :content (string-trim " " content)))))))))
+  (let ((content-pos (search ":content" request))
+		(command-pos (search ":command" request)))
+	(when (and (not (null command-pos))
+			   (not (null content-pos)))        
+		(let ((content-start (+ content-pos
+								(length ":content")))
+			  (content-end (when (< content-pos command-pos)
+							 command-pos))
+			  (command-start (+ command-pos
+								(length ":command")))
+			  (command-end (when (> content-pos command-pos)
+							 content-pos)))
+		  (list :command (string-trim " " (subseq request
+												  command-start
+												  command-end))
+				:content (string-trim " " (subseq request
+												  content-start
+												  content-end)))))))
 
 (defun generate-response (request state)
   (cond ((null request)
