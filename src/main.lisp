@@ -6,19 +6,49 @@
 
 (in-package :text-socket)
 
-(defun create-server (port)
-  (usocket:with-socket-listener (socket "127.0.0.1" port)
-  	(loop 
-	  (let ((connection (usocket:socket-accept socket :element-type 'character)))
-		(format (usocket:socket-stream connection) "Hallo~%")                
-		(force-output (usocket:socket-stream connection))
-		(usocket:wait-for-input connection)
-		(format t "Received: ~a~%"
-				(read-line (usocket:socket-stream connection)))
-		(usocket:socket-close connection)))))
+(defconstant +localhost+ "127.0.0.1")
 
-(defun create-client (port)
-  (usocket:with-client-socket (socket stream "127.0.0.1" port :element-type 'character)	
-	(usocket:wait-for-input socket)
-	(format t "Input is ~a~%" (read-line stream))
-	(format (usocket:socket-stream socket) "Fredd~%")))
+(defmacro with-accepted-connection ((connection-var &rest socket-accept-args)
+									&body body)
+  `(usocket:with-server-socket (,connection-var (usocket:socket-accept ,@socket-accept-args))
+	 ,@body))
+
+(defun create-server (port)
+  (usocket:with-socket-listener (socket +localhost+ port)
+	(let ((name nil))
+	  (loop
+		(with-accepted-connection (connection socket :element-type 'character)
+		  (usocket:wait-for-input connection)
+		  (multiple-value-bind (request eof-p)
+			  (read-line (usocket:socket-stream connection)	nil)
+			(if eof-p
+				(format t "Client terminated~%")
+				(progn 
+				  (format t "Received ~a~%" request)
+				  (setf name request)
+				  (send-over-connection connection (format nil "Hi ~a~%" name))))))))))
+
+(defun get-name (connection)
+  (send-over-connection connection "Welcome! Please Enter your name:~%")
+  (usocket:wait-for-input connection)
+  (let (( name (read-line (usocket:socket-stream connection))))
+	(send-over-connection connection (format nil "Welcome ~a!~%" name))
+	name))
+
+(defun send-over-connection (connection text)
+  (progn
+	(format (usocket:socket-stream connection) text)                
+	(force-output (usocket:socket-stream connection))))
+
+(defun create-client (port)  
+  (loop
+	(usocket:with-client-socket (socket stream +localhost+ port :element-type 'character)
+	  (format t "Welcome to Text Socket!~% Please enter your name:~%")
+	  (let ((command (format nil "~a~~%" (read-line))))        
+		(send-over-connection socket command))
+	  (usocket:wait-for-input socket)
+	  (format t "~a~%" (read-line stream))
+	  )))
+
+;; ~% very important!
+;; if server is waiting and client is cut, server breaks
