@@ -21,12 +21,21 @@
 														  :description "Contains everything you own except the clothes on your back."))))
   "All objects grouped by their initial location")
 
-(defconstant +command-tags+ '(:name
+(defconstant +command-tags+ '(:get
+							  :inventory
+							  :look
+							  :help
+							  :exit))
+
+(defconstant +request-tags+ '(:name
 							  :get
-							  :inventory))
+							  :inventory
+							  :look))
 
 (defconstant +response-tags+ '(:name
 							   :get
+							   :inventory
+                               :location
 							   :error))
 
 (defmacro with-accepted-connection ((connection-var &rest socket-accept-args)
@@ -36,7 +45,11 @@
 
 (defun create-server (port)
   (usocket:with-socket-listener (socket +localhost+ port)
-	(let ((state +init-state+))
+	(let ((state nil))
+	  (setf state +init-state+) ;; to fix weird issues with STATE initialising properly
+	  ;; Change :location to object?
+	  (setf (getf state :location) :bedroom) ;;; todo change to use start check
+	  (format t "state: ~a" state)
 	  (loop
 		(with-accepted-connection (connection socket :element-type 'character)
 		  (usocket:wait-for-input connection)
@@ -51,33 +64,29 @@
 					(format t "Responding with: ~a~%" response)
 					(send-over-connection connection (format nil "~a~%" response)))))))))))
 
-;; (defun parse-request (request)
-;;   "Expect string of form ':command <cmd> :content <content>'"
-;;   (let ((content-pos (search ":content" request))
-;; 		(command-pos (search ":command" request)))
-;; 	(when (and (not (null command-pos))
-;; 			   (not (null content-pos)))        
-;; 		(let* ((content-start (+ content-pos
-;; 								(length ":content")))
-;; 			  (content-end (when (< content-pos command-pos)
-;; 							 command-pos))
-;; 			  (command-start (+ command-pos
-;; 								(length ":command")))
-;; 			  (command-end (when (> content-pos command-pos)
-;; 							 content-pos))
-;; 			   (command (string-trim " " (subseq request command-start command-end)))
-;; 			   (content (string-trim " " (subseq request content-start content-end))))
-;; 		  (list :command command
-;; 				:content content)))))
-
-(defun parse-request (request)
-  (multiple-value-bind (tag-str args) (split-by-first-space request)    
-	(let ((valid-tag (find tag-str +command-tags+
-						   :test (lambda (tag-str cmd-tag)
-								   (equalp tag-str (symbol-name cmd-tag))))))
-	  (if (not (null valid-tag))
-		  (list valid-tag args)
-		  `(:error ,(format nil "bad request: ~a" request))))))
+(defun parse-request (request)  
+  (multiple-value-bind (tag-str args-str) (split-by-first-space request)    
+	(let ((valid-tag (find tag-str +request-tags+
+						   :test #'eq-symbol)))
+      (case valid-tag
+		(:name
+		 `(:name ,args-str))
+		(:get
+		 (if (zerop (length args-str))
+             '(:error "no item specified")
+			 `(:get ,args-str)))
+		(:inventory
+		 (if (zerop (length args-str))
+			 '(:inventory nil)
+			 `(:error ,(format nil "unexpected arguments: ~{~a, ~}"
+							   args-str))))
+		(:look
+		 (if (zerop (length args-str))
+			 '(:look nil)
+			 `(:error ,(format nil "unexpected arguments: ~{~a, ~}"
+							   args-str))))
+		(otherwise
+		 `(:error ,(format nil "bad request: ~a" request)))))))
 
 (defun generate-response (request state)  
   (let ((command (first request))
@@ -90,15 +99,27 @@
 	  (:get
 	   (let* ((location (getf state :location))
 			  (in-inventory (in-inventory content state))
-			  (in-location (object-in-location content location)))		   
+			  (item (item-by-code-and-location content location)))		   
 		 (cond
 		   (in-inventory
 			(format nil "error in-inventory"))
-		   ((not in-location)
+		   ((null item)
 			(format nil "error not-found"))
 		   (t
-			(push content (getf state :inventory))
-			(format nil "~a ~a" command content)))))
+			(push item (getf state :inventory))
+			(format nil "~a ~a" command
+					(getf item :name))))))
+
+	  (:inventory
+	   (let* ((inventory (getf state :inventory))
+			  (response (if (null inventory)
+							"empty"
+							(format nil "~{~{ ~a ~} ~}" inventory))))
+		 (format nil "~a ~a" command response)))
+
+	  (:look
+	   (let ((location (getf state :location)))
+		 (format nil "~a ~{~{~a ~} ~}" :location location)))
 	  
 	  (:error
 	   content))))
@@ -106,19 +127,19 @@
 (defun in-inventory (object-code state)
   (let* ((inventory (getf state :inventory))
 		(match (find object-code inventory
-					 :test #'(lambda (object-code object)
-							   (equalp object-code
-									   (getf object :code))))))
+					 :test #'eq-symbol)))
 	(not (null match))))
 
-(defun object-in-location (object-code location-name)
+(defun item-by-code-and-location (item-code location-name)
   (let* ((location (getf +objects-by-location+ location-name))
-		 (objects (getf location :objects))
-		 (match (find object-code objects
-					  :test #'(lambda (object-code object)
-								(equalp object-code
-										(getf object :code))))))
-	(not (null match))))
+		 (items (getf location :objects))
+		 (match (find item-code items
+					  :test #'(lambda (item-code item)
+								(eq-symbol item-code (getf item :code))))))
+	match))
+
+(defun object-in-location (object-code location-name)
+  (not (null (item-by-code object-code location-name))))
 
 (defun send-over-connection (connection text)
   (progn
@@ -132,29 +153,32 @@
 	  while (not (null continue?))
 	  do (usocket:with-client-socket (socket stream +localhost+ port :element-type 'character)
            (format t "~a~%" (message-from-state state))
-		   (format t "~a:> " (if (and (listp state)
-									   (getf state :name))
-								(getf state :name)
+		   (format t "~a:> " (or (getf state :name)
 								""))
-		   (let* ((command (read-line)))
-			 (if (equalp command "exit")
-				 (setf continue? nil)
-				 (progn 
-				   (let ((request (create-request state command)))
-					 (send-over-connection socket (format nil "~a~%" request)))
-				   (usocket:wait-for-input socket)
-				   (let* ((response (read-line stream))
-						  (parsed (parse-response response)))                     
-					 (when (not (null parsed))
-					   (format t "parsed: ~a~%" parsed)
-                       (let ((subject (first parsed))
-							 (payload (second parsed)))
-						 (format t "subject: ~a~% payload: ~a~%" subject payload)
-						 (if (equalp subject :name)
-							 (setf state (list subject payload))
-							 (setf state (list :name (getf state :name)
-											   subject payload)))))))))))))
-(defun message-from-state (state)
+		   (let* ((command (read-line))
+				  (parsed-command (parse-command state command))
+				  (tag (first parsed-command))
+				  (args (second parsed-command)))             
+			 (case tag
+			   (:error
+				(format t "ERROR parsing command: ~a~%" args))
+			   (:exit 
+				(setf continue? nil))
+			   (:help
+				(format t "Available commands:~%~{~a~%~}" +command-tags+))
+			   (otherwise				 
+				(let ((request (create-request tag args)))
+				  (if (eql request :error)
+					  (format t "ERROR creating request: ~a~%" args)
+					  (progn
+						(format t "sending ~a~%" request)
+						(send-over-connection socket (format nil "~a~%" request))
+						(usocket:wait-for-input socket)
+						(let* ((response (read-line stream))
+							   (parsed (parse-response response)))                     
+						  (setf state (next-client-state state parsed)))))))))))))
+
+(defun message-from-state (state)  
   (format t "~a~%" state)
   (cond ((not (listp state))
 		 "Whoops there's something off here. Please close and restart this session!")
@@ -162,26 +186,66 @@
 			 (null (getf state :name)))         
 		 (format nil "Welcome to Text Socket!~%Please enter your name:"))
 		((not (null (getf state :get)))
-		 (format nil "Picked up the ~a" (getf state "get")))
+		 (format nil "Picked up the ~a" (getf state :get)))
 		((not (null (getf state :error)))
 		 (getf state :error))
 		(t
-		 (format nil "Well ~a, what now?" (getf state :name)))))
+		 (format nil "~{~a ~%~}~%" state))))
 
-(defun create-request (state command)  
+(defun parse-command (state command)
   (if (null state)
-	  (format nil "name ~a" command)
-	  (multiple-value-bind (tag args) (split-by-first-space command)
-		(if (find tag +command-tags+ :test #'(lambda (tag-str cmd-tag)
-											   (equalp tag-str (symbol-name cmd-tag))))
-			(format nil "~a ~a" tag args)
-			nil))))
+	  ;; Always assume setting name
+	  `(:name ,command)
+	  (multiple-value-bind (tag-str args-str) (split-by-first-space command)
+		(let ((tag (command-tag-from-string tag-str)))
+		  (case tag
+			(:exit
+			 (if (zerop (length args-str))
+				 '(:exit)
+				 (no-args-expected-error args-str)))
+			(:help
+			 (if (zerop (length args-str))
+				 '(:help)
+				 (no-args-expected-error args-str)))
+			(:inventory
+			 (if (zerop (length args-str))
+				 '(:inventory)
+				 (no-args-expected-error args-str)))
+			(:look
+			 (if (zerop (length args-str))
+				 '(:look)
+				 (no-args-expected-error args-str)))
+			(:get
+			 (if (zerop (length args-str))
+                 (args-expected-error)
+				 `(:get ,args-str)))
+			(otherwise
+			 `(:error ,(format nil "Invalid command ~a" tag))))))))
+
+(defun args-expected-error ()
+  `(:error ,(format nil "Expected an argument")))
+
+(defun no-args-expected-error (args-str)
+  `(:error ,(format nil "No arguments expected. Received ~a" args-str)))
+
+(defun command-tag-from-string (string)
+  (find string +command-tags+ :test #'eq-symbol))
+
+(defun create-request (command-tag args)  
+  (case command-tag
+	((:inventory :look)
+	 (symbol-name command-tag))
+	((:name :get)
+	 (format nil "~a ~a"
+			 (symbol-name command-tag)
+			 args))
+	(otherwise
+	 :error)))
 
 (defun parse-response (response)
   (multiple-value-bind (tag-str args) (split-by-first-space response)
 	(let ((valid-tag (find tag-str +response-tags+
-						   :test (lambda (tag-str cmd-tag)
-								   (equalp tag-str (symbol-name cmd-tag))))))
+						   :test #'eq-symbol)))
 	  (if (not (null  valid-tag))
 		  (list valid-tag args)
 		  `(:error ,(format nil "bad response: ~a" response))))))
@@ -197,6 +261,21 @@
 		(values string nil)
 		(values (subseq string 0 first-space-pos)
 				(subseq string (+ first-space-pos 1))))))
+
+(defun next-client-state (state parsed-response)
+  (when (not (null parsed-response))
+	(format t "parsed: ~a~%" parsed-response)
+    (let ((subject (first parsed-response))
+		  (payload (second parsed-response)))
+	  (format t "subject: ~a~% payload: ~a~%" subject payload)
+	  (if (equalp subject :name)
+		  (list subject payload)
+		  (list :name (getf state :name)
+				subject payload)))))
+
+(defun eq-symbol (string symbol)
+  "Checks if STRING equals SYMBOL"
+  (equalp string (symbol-name symbol)))
 
 ;; ~% very important for read-line
 ;; are defconstants appropriate here?
